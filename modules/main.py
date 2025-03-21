@@ -183,7 +183,7 @@ async def set_token(bot: Client, m: Message):
     TOKEN = new_token  # Update the token globally
     await m.reply_text(f"✅ Token updated successfully!")
 
-@bot.on_message(filters.command(["pw"])
+@bot.on_message(filters.command(["pw"]))
 @auth_required
 async def account_login(bot: Client, m: Message):
     editable = await m.reply_text(
