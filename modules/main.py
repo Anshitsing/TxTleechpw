@@ -60,7 +60,7 @@ async def web_server():
     return web_app
 
 # 🔹 Super Admin (Only this ID can manage users)
-SUPER_ADMIN = 123456789  # Replace with your Telegram ID
+SUPER_ADMIN = 7523934472  # Replace with your Telegram ID
 
 # 🔹 File to store authorized users
 AUTH_FILE = "authorized_users.json"
