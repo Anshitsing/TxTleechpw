@@ -59,6 +59,72 @@ async def web_server():
     web_app.add_routes(routes)
     return web_app
 
+# 🔹 Super Admin (Only this ID can manage users)
+SUPER_ADMIN = 123456789  # Replace with your Telegram ID
+
+# 🔹 File to store authorized users
+AUTH_FILE = "authorized_users.json"
+
+# ✅ Load authorized users
+if os.path.exists(AUTH_FILE):
+    with open(AUTH_FILE, "r") as f:
+        AUTH_USERS = json.load(f)
+else:
+    AUTH_USERS = [SUPER_ADMIN]
+
+# ✅ Save authorized users
+def save_auth_users():
+    with open(AUTH_FILE, "w") as f:
+        json.dump(AUTH_USERS, f)
+
+# ✅ Authentication Check (Except /start)
+def is_authorized(user_id):
+    return user_id in AUTH_USERS
+
+# 
+
+# ✅ Handle /auth (Manage Authorized Users)
+@bot.on_message(filters.command("auth") & filters.user(SUPER_ADMIN))
+async def manage_auth(client, message):
+    args = message.text.split()
+    
+    if len(args) < 3:
+        await message.reply_text("Usage:\n/auth add user_id\n/auth remove user_id\n/auth list")
+        return
+    
+    command, action, user_id = args[0], args[1], args[2]
+
+    try:
+        user_id = int(user_id)
+        if action == "add":
+            if user_id not in AUTH_USERS:
+                AUTH_USERS.append(user_id)
+                save_auth_users()
+                await message.reply_text(f"✅ User {user_id} added to authorized list.")
+            else:
+                await message.reply_text("⚠️ User is already authorized.")
+        elif action == "remove":
+            if user_id in AUTH_USERS:
+                AUTH_USERS.remove(user_id)
+                save_auth_users()
+                await message.reply_text(f"❌ User {user_id} removed from authorized list.")
+            else:
+                await message.reply_text("⚠️ User is not authorized.")
+        else:
+            await message.reply_text("⚠️ Invalid action. Use 'add' or 'remove'.")
+    except ValueError:
+        await message.reply_text("⚠️ Invalid user ID.")
+
+
+# ✅ Authentication Wrapper for Commands
+def auth_required(func):
+    async def wrapper(client, message):
+        if not is_authorized(message.from_user.id):
+            await message.reply_text("🚫 You are not authorized to use this command.")
+            return
+        await func(client, message)
+    return wrapper
+
 async def start_bot():
     await bot.start()
     print("Bot is up and running")
@@ -105,6 +171,7 @@ async def restart_handler(_, m):
     os.execl(sys.executable, sys.executable, *sys.argv)
 
 @bot.on_message(filters.command("settoken"))
+@auth_required
 async def set_token(bot: Client, m: Message):
     global TOKEN
     await m.reply_text("🔑 Send the new token")
@@ -116,7 +183,8 @@ async def set_token(bot: Client, m: Message):
     TOKEN = new_token  # Update the token globally
     await m.reply_text(f"✅ Token updated successfully!")
 
-@bot.on_message(filters.command(["pw"]))
+@bot.on_message(filters.command(["pw"])
+@auth_required
 async def account_login(bot: Client, m: Message):
     editable = await m.reply_text(
         "Send **Auth code** in this manner otherwise bot will not respond.\n\nSend like this:-  **AUTH CODE**"
@@ -199,6 +267,7 @@ async def account_login(bot: Client, m: Message):
 
 
 @bot.on_message(filters.command("speedtest"))
+@auth_required
 async def speedtest_command(client, message):
     msg = await message.reply_text("⏳ Running speed test... Please wait.")
 
@@ -252,96 +321,71 @@ async def speedtest_command(client, message):
         await msg.edit_text(f"⚠️ Speedtest failed: {e}")
 
 
-# Dictionary to track users waiting for a .sh file
-# 🔹 Super Admin (Only this ID can manage users)
-SUPER_ADMIN = 7523934472 # Replace with your Telegram ID
-
-# 🔹 Load Authorized Users from File
-AUTH_FILE = "auth_users.txt"
-AUTH_USERS = set()
-
-if os.path.exists(AUTH_FILE):
-    with open(AUTH_FILE, "r") as f:
-        AUTH_USERS = {int(line.strip()) for line in f}
-
-# 🔹 Function to Save AUTH_USERS to File
-def save_auth_users():
-    with open(AUTH_FILE, "w") as f:
-        for user_id in AUTH_USERS:
-            f.write(f"{user_id}\n")
 
 
 
-# 🔹 Handle /sh Command (Authentication Check)
-@bot.on_message(filters.command("sh") & filters.private)
-async def sh_command(client, message):
+# 🔹 Dictionary to track users waiting for a .sh file
+waiting_for_sh = {}
+
+# ✅ Handle /start (No Auth Required)
+
+
+# ✅ Handle /sh (Ask for .sh file) - Requires Auth
+@bot.on_message(filters.command("sh"))
+@auth_required
+async def ask_for_sh(client, message):
+    """When user types /sh, ask them to send a .sh file."""
     user_id = message.from_user.id
-    if user_id not in AUTH_USERS:
-        await message.reply_text("❌ You're not allowed to use this command!")
-        return
+    waiting_for_sh[user_id] = True
+    await message.reply_text("📂 Please send a `.sh` file to process.")
 
-    await message.reply_text("📂 Please send the .sh file.")
-
-# 🔹 Handle /auth Command (Super Admin Only)
-@bot.on_message(filters.command("auth") & filters.private)
-async def auth_command(client, message):
+# ✅ Handle .sh file upload and process it
+@bot.on_message(filters.document)
+async def handle_sh_file(client, message):
+    """Handle the received .sh file if the user requested processing."""
     user_id = message.from_user.id
 
-    # 🔹 Only Super Admin Can Modify AUTH_USERS
-    if user_id != SUPER_ADMIN:
-        await message.reply_text("❌ You are not authorized to modify user permissions!")
+    if user_id not in waiting_for_sh or not waiting_for_sh[user_id]:
+        await message.reply_text("❌ Please use `/sh` first before sending a `.sh` file.")
         return
 
-    args = message.text.split()
-
-    if len(args) < 2:
-        await message.reply_text("⚠️ Usage:\n/auth add <user_id>\n/auth remove <user_id>\n/auth list")
+    doc = message.document
+    if not doc.file_name.endswith(".sh"):
+        await message.reply_text("❌ Please send a valid `.sh` file.")
         return
 
-    action = args[1].lower()
+    # Download file
+    sh_path = await client.download_media(doc)
+    output_path = sh_path.replace(".sh", ".txt")
 
-    if action == "add":
-        if len(args) < 3:
-            await message.reply_text("⚠️ Please provide a user ID to add!")
-            return
+    # Extract data using regex
+    title_pattern = r'(?<=-f ")([^"]+)'  # Matches both .mp4 and .pdf titles
+    url_pattern = r'(https?://[^\s"]+)'  # Matches URLs
 
-        try:
-            new_user = int(args[2])
-            if new_user in AUTH_USERS:
-                await message.reply_text(f"✅ User {new_user} is already authorized.")
-            else:
-                AUTH_USERS.add(new_user)
-                save_auth_users()
-                await message.reply_text(f"✅ Added user {new_user} to authorized users.")
-        except ValueError:
-            await message.reply_text("❌ Invalid user ID!")
+    titles, urls = [], []
 
-    elif action == "remove":
-        if len(args) < 3:
-            await message.reply_text("⚠️ Please provide a user ID to remove!")
-            return
+    with open(sh_path, "r", encoding="utf-8") as file:
+        for line in file:
+            title_match = re.search(title_pattern, line)
+            url_match = re.search(url_pattern, line)
 
-        try:
-            remove_user = int(args[2])
-            if remove_user in AUTH_USERS:
-                AUTH_USERS.remove(remove_user)
-                save_auth_users()
-                await message.reply_text(f"✅ Removed user {remove_user} from authorized users.")
-            else:
-                await message.reply_text(f"❌ User {remove_user} is not in the authorized list.")
-        except ValueError:
-            await message.reply_text("❌ Invalid user ID!")
+            if title_match:
+                title = re.sub(r'\.mp4|\.pdf|pdf', '', title_match.group(0), flags=re.IGNORECASE).strip()
+                titles.append(title)  
+            if url_match:
+                urls.append(url_match.group(0))
 
-    elif action == "list":
-        if not AUTH_USERS:
-            await message.reply_text("🔹 No authorized users.")
-        else:
-            user_list = "\n".join([f"- {uid}" for uid in AUTH_USERS])
-            await message.reply_text(f"🔹 Authorized Users:\n{user_list}")
+    with open(output_path, "w", encoding="utf-8") as file:
+        for title, url in zip(titles, urls):
+            file.write(f"{title} {url}\n")
 
-    else:
-        await message.reply_text("⚠️ Invalid action! Use:\n/auth add <user_id>\n/auth remove <user_id>\n/auth list")
+    await message.reply_document(output_path, caption="📄 Processed output file Extracted By Invisible.")
 
+    # Cleanup
+    os.remove(sh_path)
+    os.remove(output_path)
+    del waiting_for_sh[user_id]
+    
 
 
 
@@ -349,6 +393,7 @@ async def auth_command(client, message):
 
 
 @bot.on_message(filters.command(["upload"]))
+@auth_required
 async def account_login(bot: Client, m: Message):
     editable = await m.reply_text('𝐓𝐨 𝐃𝐨𝐰𝐧𝐥𝐨𝐚𝐝 𝐀 𝐓𝐱𝐭 𝐅𝐢𝐥𝐞 𝐒𝐞𝐧𝐝 𝐇𝐞𝐫𝐞 ⏍')
     input: Message = await bot.listen(editable.chat.id)
